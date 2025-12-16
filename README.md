@@ -12,7 +12,10 @@
  - 开启“自动保存”
  - 开启“保存到相册”
 
- <img src="https://github.com/user-attachments/assets/ab7bc0bd-9abc-4cd9-8020-465165255f44" width=60%>
+<p>
+ <img src="https://github.com/user-attachments/assets/ab7bc0bd-9abc-4cd9-8020-465165255f44#gh-light-mode-only" width=60%>
+ <img src="https://github.com/user-attachments/assets/1b0f37e8-ae6f-4cdb-8d68-83ca03c53e43#gh-dark-mode-only" width=60%>
+</p>
 
 3.电脑端：下载Pic2Pad，首次使用时需要点击设置，填写一个用户名、设备名，并选择截图文件路径：
  - 在使用时，如果截图工具选择系统自带win+shift+s，那么找到Windows截图文件夹并选择，保存即可。（可以在截图工具-设置中找到保存路径）
