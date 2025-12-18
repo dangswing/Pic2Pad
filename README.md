@@ -11,6 +11,7 @@
 2.平板端：下载Localsend，并在设置中
  - 开启“自动保存”
  - 开启“保存到相册”
+ - 打开“高级设置”，关闭加密选项
 
 <p>
  <img src="https://github.com/user-attachments/assets/ab7bc0bd-9abc-4cd9-8020-465165255f44#gh-light-mode-only" width=60%>
