@@ -4,9 +4,9 @@
 - 基于[LocalSend Protocol v2.1](https://github.com/localsend/protocol)
 
 ## 下载方式
-更新日期：2026/05/16
+- **更新日期：2026/05/16**
 
-点击下载：[Pic2Pad_v1.2](https://github.com/dangswing/Pic2Pad/releases/download/v1.2/Pic2Pad_1.2.exe)
+- **点击下载：[Pic2Pad_v1.2](https://github.com/dangswing/Pic2Pad/releases/download/v1.2/Pic2Pad_1.2.exe)**
 
 ## 使用准备
 
