@@ -3,6 +3,11 @@
 - Pic2Pad是一个自由、开源的应用程序，启动后自动检测Windows新截图并自动发送至其他设备，以便将截图直接插入笔记软件。
 - 基于[LocalSend Protocol v2.1](https://github.com/localsend/protocol)
 
+## 下载方式
+更新日期：2026/05/16
+
+点击下载：[Pic2Pad_v1.2](https://github.com/dangswing/Pic2Pad/releases/download/v1.2/Pic2Pad_1.2.exe)
+
 ## 使用准备
 
 1.将电脑和平板连接到同一局域网
@@ -11,7 +16,7 @@
 2.平板端：下载Localsend，并在设置中
  - 开启“自动保存”
  - 开启“保存到相册”
- - **v1.2及更高版本无需切换高级设置中的加密开关**
+ - **v1.2及更高版本无需修改高级设置中的加密开关**
 
 <p>
  <img src="https://github.com/user-attachments/assets/ab7bc0bd-9abc-4cd9-8020-465165255f44#gh-light-mode-only" width=60%>
