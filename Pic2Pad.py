@@ -15,7 +15,7 @@ import urllib3
 from PIL import Image, ImageDraw
 import pystray, base64, io
 
-VER = "1.2"
+VER = "1.2.1"
 CONFIG_FILE = "piconfig.json"
 DEFAULT_CONFIG = {
     "ip_addr": "192.168.1.1",
@@ -29,16 +29,15 @@ DEFAULT_CONFIG = {
 
 MULTICAST_GROUP = "224.0.0.167"
 DISCOVERY_TIMEOUT_SEC = 2.0
-HTTP_SCAN_WORKERS = 48
+HTTP_SCAN_WORKERS = 50
+HTTP_SCAN_MAX_INTERFACES = 3
+SMART_SCAN_LEGACY_DELAY_SEC = 1.0
+HTTP_DISCOVERY_TIMEOUT_SEC = 0.5
+MULTICAST_ANNOUNCE_DELAYS_SEC = (0.1, 0.5, 2.0)
 
 DISCOVERY_IDLE_INTERVAL_SEC = 1.0
 DISCOVERY_ACTIVE_INTERVAL_SEC = 4.0
 DISCOVERY_ERROR_RETRY_INTERVAL_SEC = 2.0
-HTTP_SCAN_EVERY_N_LOOPS_IDLE = 2
-HTTP_SCAN_EVERY_N_LOOPS_ACTIVE = 4
-FIRST_ROUND_MULTICAST_TIMEOUT_SEC = 0.8
-FIRST_ROUND_HTTP_TIMEOUT_SEC = 0.8
-FIRST_ROUND_HTTP_MAX_CANDIDATES = 160
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
@@ -209,6 +208,17 @@ class LocalSendGUI(tk.Tk):
         except (TypeError, ValueError):
             return 53317
 
+    @staticmethod
+    def protocol_candidates(preferred: str | None = None) -> list[str]:
+        preferred = str(preferred or "").lower()
+        protocols = []
+        if preferred in ("http", "https"):
+            protocols.append(preferred)
+        for protocol in ("https", "http"):
+            if protocol not in protocols:
+                protocols.append(protocol)
+        return protocols
+
     def build_discovery_payload(self, announce: bool = False) -> dict:
         payload = {
             "alias": self.config_data.get("user", "").strip() or "Pic2Pad",
@@ -228,35 +238,49 @@ class LocalSendGUI(tk.Tk):
     def is_valid_ipv4(ip: str) -> bool:
         try:
             return isinstance(ipaddress.ip_address(ip), ipaddress.IPv4Address)
-        except ValueError:
+        except (TypeError, ValueError):
             return False
 
-    def get_local_ipv4s(self) -> set[str]:
-        ips = set()
+    @staticmethod
+    def is_usable_local_ipv4(ip: str) -> bool:
+        try:
+            addr = ipaddress.ip_address(ip)
+        except (TypeError, ValueError):
+            return False
+        return (
+            isinstance(addr, ipaddress.IPv4Address)
+            and not addr.is_loopback
+            and not addr.is_link_local
+            and not addr.is_multicast
+            and not addr.is_unspecified
+        )
+
+    def get_local_ipv4s(self) -> list[str]:
+        ips: list[str] = []
+        seen: set[str] = set()
+
+        def add_ip(ip: str):
+            if self.is_usable_local_ipv4(ip) and ip not in seen:
+                seen.add(ip)
+                ips.append(ip)
+
+        # 先通过系统路由表拿首选网卡地址。UDP connect 不会实际发包。
+        for host, port in (("8.8.8.8", 80), ("1.1.1.1", 80), (MULTICAST_GROUP, self.get_port())):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                    probe.connect((host, port))
+                    add_ip(probe.getsockname()[0])
+            except OSError:
+                pass
+
         try:
             hostname = socket.gethostname()
-            _, _, host_ips = socket.gethostbyname_ex(hostname)
-            for ip in host_ips:
-                if self.is_valid_ipv4(ip):
-                    ips.add(ip)
+            for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
+                add_ip(info[4][0])
         except OSError:
             pass
 
-        # 通过默认路由拿一个稳定的局域网 IP
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
-                probe.connect(("8.8.8.8", 80))
-                ip = probe.getsockname()[0]
-                if self.is_valid_ipv4(ip):
-                    ips.add(ip)
-        except OSError:
-            pass
-
-        configured_ip = self.ip_var.get().strip()
-        if self.is_valid_ipv4(configured_ip):
-            ips.add(configured_ip)
-
-        return {ip for ip in ips if not ip.startswith("127.")}
+        return ips
 
     def normalize_discovered_device(
         self,
@@ -306,6 +330,7 @@ class LocalSendGUI(tk.Tk):
     def discover_via_multicast(self, timeout_sec: float = DISCOVERY_TIMEOUT_SEC) -> list[dict]:
         devices: dict[str, dict] = {}
         port = self.get_port()
+        local_ips = self.get_local_ipv4s()
         payload = self.build_discovery_payload(announce=True)
         raw_payload = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
@@ -318,23 +343,64 @@ class LocalSendGUI(tk.Tk):
                 listener.bind(("", port))
             except OSError:
                 listener.bind(("", 0))
-            try:
-                membership = struct.pack(
-                    "4s4s",
-                    socket.inet_aton(MULTICAST_GROUP),
-                    socket.inet_aton("0.0.0.0"),
-                )
-                listener.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
-            except OSError:
-                pass
+            joined = False
+            for ip in local_ips:
+                try:
+                    membership = struct.pack(
+                        "4s4s",
+                        socket.inet_aton(MULTICAST_GROUP),
+                        socket.inet_aton(ip),
+                    )
+                    listener.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
+                    joined = True
+                except OSError:
+                    continue
+
+            if not joined:
+                try:
+                    membership = struct.pack(
+                        "4s4s",
+                        socket.inet_aton(MULTICAST_GROUP),
+                        socket.inet_aton("0.0.0.0"),
+                    )
+                    listener.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, membership)
+                except OSError:
+                    pass
             listener.settimeout(0.2)
 
             sender = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
             sender.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
-            sender.sendto(raw_payload, (MULTICAST_GROUP, port))
 
-            deadline = time.time() + max(0.5, timeout_sec)
+            def send_announcement() -> bool:
+                sent = False
+                for ip in local_ips:
+                    try:
+                        sender.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(ip))
+                        sender.sendto(raw_payload, (MULTICAST_GROUP, port))
+                        sent = True
+                    except OSError:
+                        continue
+                if not sent:
+                    try:
+                        sender.sendto(raw_payload, (MULTICAST_GROUP, port))
+                        sent = True
+                    except OSError:
+                        pass
+                return sent
+
+            start = time.time()
+            deadline = start + max(0.5, timeout_sec)
+            next_announce = 0
             while time.time() < deadline and not self.shutdown_event.is_set():
+                elapsed = time.time() - start
+                while (
+                    next_announce < len(MULTICAST_ANNOUNCE_DELAYS_SEC)
+                    and elapsed >= MULTICAST_ANNOUNCE_DELAYS_SEC[next_announce]
+                ):
+                    if not send_announcement():
+                        return []
+                    next_announce += 1
+
                 try:
                     data, addr = listener.recvfrom(65535)
                 except socket.timeout:
@@ -356,66 +422,59 @@ class LocalSendGUI(tk.Tk):
 
         return list(devices.values())
 
-    def discover_via_http_scan(self,timeout_sec: float = DISCOVERY_TIMEOUT_SEC,max_candidates: int | None = None) -> list[dict]:
+    def discover_via_http_scan(self, request_timeout_sec: float = HTTP_DISCOVERY_TIMEOUT_SEC) -> list[dict]:
         devices: dict[str, dict] = {}
         port = self.get_port()
-        local_ips = self.get_local_ipv4s()
-        prefixes: list[str] = []
+        local_ips = self.get_local_ipv4s()[:HTTP_SCAN_MAX_INTERFACES]
+        local_ip_set = set(local_ips)
 
-        for ip in sorted(local_ips):
-            prefix = ".".join(ip.split(".")[:3])
-            if prefix not in prefixes:
-                prefixes.append(prefix)
-
-        if not prefixes:
-            return []
-
-        # 多网卡场景下限制扫描范围，避免启动卡顿
-        prefixes = prefixes[:2]
         candidates: list[str] = []
-        for prefix in prefixes:
-            for host in range(1, 255):
-                ip = f"{prefix}.{host}"
-                if ip not in local_ips:
-                    candidates.append(ip)
+        seen_candidates: set[str] = set()
 
-        configured_ip = self.ip_var.get().strip()
-        if self.is_valid_ipv4(configured_ip):
-            if configured_ip in candidates:
-                candidates.remove(configured_ip)
-            candidates.insert(0, configured_ip)
+        def add_candidate(ip: str):
+            if not self.is_valid_ipv4(ip):
+                return
+            if ip in local_ip_set or ip in seen_candidates:
+                return
+            seen_candidates.add(ip)
+            candidates.append(ip)
 
-        if max_candidates is not None and max_candidates > 0 and len(candidates) > max_candidates:
-            candidates = candidates[:max_candidates]
+        for local_ip in local_ips:
+            prefix = ".".join(local_ip.split(".")[:3])
+            for host in range(256):
+                add_candidate(f"{prefix}.{host}")
 
-        body = self.build_discovery_payload(announce=False)
+        protocols = self.protocol_candidates(self.config_data.get("target_protocol"))
+        fingerprint = self.config_data.get("fingerprint", "")
 
         def probe(target_ip: str) -> dict | None:
             if self.shutdown_event.is_set():
                 return None
-            for scheme, verify in (("http", True), ("https", False)):
-                url = f"{scheme}://{target_ip}:{port}/api/localsend/v2/register"
+            for protocol in protocols:
+                url = f"{protocol}://{target_ip}:{port}/api/localsend/v1/info"
                 try:
-                    response = requests.post(url, json=body, timeout=(0.2, 0.45), verify=verify)
+                    response = requests.get(
+                        url,
+                        params={"fingerprint": fingerprint},
+                        timeout=(0.2, request_timeout_sec),
+                        verify=protocol != "https",
+                    )
                     if response.status_code != 200:
                         continue
                     payload = response.json()
                 except Exception:
                     continue
-                return self.normalize_discovered_device(payload, target_ip, port, scheme)
+                return self.normalize_discovered_device(payload, target_ip, port, protocol)
             return None
 
-        # 滚动并发扫描，超时后立即退出，避免首轮 discovery 被慢响应设备拖慢。
         if not candidates:
             return []
 
         pool = ThreadPoolExecutor(max_workers=HTTP_SCAN_WORKERS)
         pending: set = set()
         candidate_iter = iter(candidates)
-        deadline = time.time() + max(0.2, timeout_sec)
-
         try:
-            warmup = min(len(candidates), max(HTTP_SCAN_WORKERS, 8))
+            warmup = min(len(candidates), HTTP_SCAN_WORKERS)
             for _ in range(warmup):
                 target_ip = next(candidate_iter, None)
                 if not target_ip:
@@ -423,13 +482,9 @@ class LocalSendGUI(tk.Tk):
                 pending.add(pool.submit(probe, target_ip))
 
             while pending and not self.shutdown_event.is_set():
-                remaining = deadline - time.time()
-                if remaining <= 0:
-                    break
-
                 done, _ = wait(
                     pending,
-                    timeout=min(0.25, remaining),
+                    timeout=0.25,
                     return_when=FIRST_COMPLETED,
                 )
                 if not done:
@@ -479,7 +534,6 @@ class LocalSendGUI(tk.Tk):
 
     def discovery_loop_worker(self):
         known_devices: dict[str, dict] = {}
-        loop_count = 0
         first_round = True
 
         while not self.shutdown_event.is_set():
@@ -487,24 +541,13 @@ class LocalSendGUI(tk.Tk):
             error_text = None
 
             try:
-                multicast_timeout = FIRST_ROUND_MULTICAST_TIMEOUT_SEC if first_round else DISCOVERY_TIMEOUT_SEC
+                multicast_timeout = SMART_SCAN_LEGACY_DELAY_SEC if not known_devices else DISCOVERY_TIMEOUT_SEC
                 for device in self.discover_via_multicast(timeout_sec=multicast_timeout):
                     self.merge_device(round_devices, device)
 
-                if first_round and round_devices:
-                    known_devices = round_devices.copy()
-                    self.after(0, self.on_discovery_tick, list(known_devices.values()), None, first_round)
-
-                should_http_scan = first_round
-                if not should_http_scan:
-                    if known_devices:
-                        should_http_scan = loop_count % HTTP_SCAN_EVERY_N_LOOPS_ACTIVE == 0
-                    else:
-                        should_http_scan = loop_count % HTTP_SCAN_EVERY_N_LOOPS_IDLE == 0
-                if should_http_scan:
-                    http_timeout = FIRST_ROUND_HTTP_TIMEOUT_SEC if first_round else DISCOVERY_TIMEOUT_SEC
-                    max_candidates = FIRST_ROUND_HTTP_MAX_CANDIDATES if first_round else None
-                    for device in self.discover_via_http_scan(timeout_sec=http_timeout, max_candidates=max_candidates):
+                # Match LocalSend Smart Scan: only run legacy subnet scan when multicast found nothing.
+                if not round_devices and not known_devices:
+                    for device in self.discover_via_http_scan():
                         self.merge_device(round_devices, device)
             except Exception as exc:
                 error_text = str(exc)
@@ -515,7 +558,6 @@ class LocalSendGUI(tk.Tk):
             self.after(0, self.on_discovery_tick, list(known_devices.values()), error_text, first_round)
 
             first_round = False
-            loop_count += 1
 
             if error_text:
                 sleep_sec = DISCOVERY_ERROR_RETRY_INTERVAL_SEC
@@ -623,52 +665,64 @@ class LocalSendGUI(tk.Tk):
         self.last_error = None
         ip_addr = self.config_data["ip_addr"]
         port = self.get_port()
-        target_protocol = str(self.config_data.get("target_protocol", "http")).lower()
-        if target_protocol not in ("http", "https"):
-            target_protocol = "http"
         user = self.config_data["user"] or "Pic2Pad"
         device_name = self.config_data["device_name"] or socket.gethostname()
-        url1 = f"{target_protocol}://{ip_addr}:{port}/api/localsend/v2/prepare-upload"
-        payload = {
-            "info": {
-                "alias": user,
-                "version": "2.0",
-                "deviceModel": device_name,
-                "deviceType": "desktop",
-                "fingerprint": self.config_data.get("fingerprint", ""),
-                "port": port,
-                "protocol": target_protocol,
-                "download": False,
-            },
-            "files": {
-                "id": {
-                    "id": "myfile",
-                    "fileName": os.path.basename(filename),
-                    "size": os.path.getsize(filename),
-                    "fileType": "image/jpeg",
-                    "sha256": "",
-                    "preview": "",
-                }
-            },
-        }
-        try:
-            verify = target_protocol != "https"
+
+        def build_payload(protocol: str) -> dict:
+            return {
+                "info": {
+                    "alias": user,
+                    "version": "2.0",
+                    "deviceModel": device_name,
+                    "deviceType": "desktop",
+                    "fingerprint": self.config_data.get("fingerprint", ""),
+                    "port": port,
+                    "protocol": protocol,
+                    "download": False,
+                },
+                "files": {
+                    "id": {
+                        "id": "myfile",
+                        "fileName": os.path.basename(filename),
+                        "size": os.path.getsize(filename),
+                        "fileType": "image/jpeg",
+                        "sha256": "",
+                        "preview": "",
+                    }
+                },
+            }
+
+        def try_send(protocol: str, payload: dict):
+            verify = protocol != "https"
+            url1 = f"{protocol}://{ip_addr}:{port}/api/localsend/v2/prepare-upload"
             r = requests.post(url1, json=payload, timeout=5, verify=verify)
             r.raise_for_status()
             data = r.json()
             url2 = (
-                f"{target_protocol}://{ip_addr}:{port}/api/localsend/v2/upload?sessionId="
+                f"{protocol}://{ip_addr}:{port}/api/localsend/v2/upload?sessionId="
                 f"{data['sessionId']}&fileId=myfile&token={data['files']['myfile']}"
             )
             with open(filename, "rb") as f:
                 res = requests.post(url2, data=f, timeout=10, verify=verify)
                 res.raise_for_status()
-            self.status_var.set(f"传输完成: {os.path.basename(filename)}")
+
+        errors = []
+        for protocol in self.protocol_candidates(self.config_data.get("target_protocol")):
+            payload = build_payload(protocol)
+            try:
+                try_send(protocol, payload)
+                if self.config_data.get("target_protocol") != protocol:
+                    self.config_data["target_protocol"] = protocol
+                    self.write_config()
+                self.after(0, self.status_var.set, f"传输完成: {os.path.basename(filename)}")
+                return
+            except Exception as exc:
+                errors.append(f"{protocol}: {exc}")
+
         # except Exception as exc:
         #     self.status_var.set(f"传输失败！请尝试重启平板端Localsend")
-        except Exception as exc:
-            self.last_error = str(exc)
-            self.after(0, self.status_var.set, "传输失败 [点击查看详情]")
+        self.last_error = "\n".join(errors)
+        self.after(0, self.status_var.set, "传输失败 [点击查看详情]")
 
 if __name__ == "__main__":
     app = LocalSendGUI()
