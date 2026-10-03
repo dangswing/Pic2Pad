@@ -5,18 +5,29 @@ import time
 import threading
 import socket
 import struct
+import ssl
 import uuid
 import ipaddress
+import hashlib
+import mimetypes
 import tkinter as tk
+from datetime import datetime, timedelta, timezone
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from tkinter import ttk, filedialog, messagebox
 import urllib3
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
+from requests.adapters import HTTPAdapter
 
 from PIL import Image, ImageDraw
 import pystray, base64, io
 
-VER = "1.2.1"
+VER = "1.3.0"
 CONFIG_FILE = "piconfig.json"
+CLIENT_CERT_FILE = "pic2pad_cert.pem"
+CLIENT_KEY_FILE = "pic2pad_key.pem"
 DEFAULT_CONFIG = {
     "ip_addr": "192.168.1.1",
     "port": 53317,
@@ -25,6 +36,7 @@ DEFAULT_CONFIG = {
     "folder_path": r"",
     "fingerprint": "",
     "target_protocol": "http",
+    "target_fingerprint": "",
 }
 
 MULTICAST_GROUP = "224.0.0.167"
@@ -38,8 +50,27 @@ MULTICAST_ANNOUNCE_DELAYS_SEC = (0.1, 0.5, 2.0)
 DISCOVERY_IDLE_INTERVAL_SEC = 1.0
 DISCOVERY_ACTIVE_INTERVAL_SEC = 4.0
 DISCOVERY_ERROR_RETRY_INTERVAL_SEC = 2.0
+FILE_RETRY_INTERVAL_SEC = 5.0
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+
+class FingerprintAdapter(HTTPAdapter):
+    """Pin a self-signed HTTPS peer to its LocalSend certificate fingerprint."""
+
+    def __init__(self, fingerprint: str, *args, **kwargs):
+        self.fingerprint = fingerprint
+        super().__init__(*args, **kwargs)
+
+    def init_poolmanager(self, connections, maxsize, block=False, **pool_kwargs):
+        pool_kwargs["assert_fingerprint"] = self.fingerprint
+        return super().init_poolmanager(connections, maxsize, block=block, **pool_kwargs)
+
+    def cert_verify(self, conn, url, verify, cert):
+        super().cert_verify(conn, url, verify, cert)
+        # requests 2.32 may rebuild TLS pool attributes per request, so set the
+        # urllib3 pool property here as well as during pool initialization.
+        conn.assert_fingerprint = self.fingerprint
 
 ICON_BASE64 = (
     "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"
@@ -69,6 +100,7 @@ class LocalSendGUI(tk.Tk):
         # 加载配置
         self.config_data = self.load_config()
         self.ensure_fingerprint()
+        self.tls_fingerprint = self.ensure_tls_identity()
 
         # ---------------- 顶部行：IP -----------------
         ttk.Label(self, text="IP 地址:", anchor="center").grid(row=0, column=0, padx=10, pady=10, sticky="ew")
@@ -202,6 +234,98 @@ class LocalSendGUI(tk.Tk):
             self.write_config()
         return fingerprint
 
+    def ensure_tls_identity(self) -> str:
+        """Load or create the persistent mTLS identity required by LocalSend."""
+        if os.path.exists(CLIENT_CERT_FILE) and os.path.exists(CLIENT_KEY_FILE):
+            with open(CLIENT_CERT_FILE, "rb") as cert_file:
+                cert = x509.load_pem_x509_certificate(cert_file.read())
+            with open(CLIENT_KEY_FILE, "rb") as key_file:
+                private_key = serialization.load_pem_private_key(key_file.read(), password=None)
+
+            cert_public_key = cert.public_key().public_bytes(
+                serialization.Encoding.DER,
+                serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+            key_public_key = private_key.public_key().public_bytes(
+                serialization.Encoding.DER,
+                serialization.PublicFormat.SubjectPublicKeyInfo,
+            )
+            if cert_public_key != key_public_key:
+                raise ValueError("Pic2Pad 客户端证书与私钥不匹配")
+            return cert.fingerprint(hashes.SHA256()).hex().upper()
+
+        private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        subject = issuer = x509.Name([
+            x509.NameAttribute(NameOID.COMMON_NAME, "LocalSend User"),
+        ])
+        now = datetime.now(timezone.utc)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(issuer)
+            .public_key(private_key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - timedelta(days=1))
+            .not_valid_after(now + timedelta(days=3650))
+            .sign(private_key, hashes.SHA256())
+        )
+
+        key_bytes = private_key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        cert_bytes = cert.public_bytes(serialization.Encoding.PEM)
+        key_tmp = f"{CLIENT_KEY_FILE}.tmp"
+        cert_tmp = f"{CLIENT_CERT_FILE}.tmp"
+        with open(key_tmp, "wb") as key_file:
+            key_file.write(key_bytes)
+        with open(cert_tmp, "wb") as cert_file:
+            cert_file.write(cert_bytes)
+        os.replace(key_tmp, CLIENT_KEY_FILE)
+        os.replace(cert_tmp, CLIENT_CERT_FILE)
+        return cert.fingerprint(hashes.SHA256()).hex().upper()
+
+    @staticmethod
+    def normalize_fingerprint(value: str | None) -> str:
+        fingerprint = str(value or "").replace(":", "").strip().upper()
+        if len(fingerprint) != 64:
+            return ""
+        try:
+            bytes.fromhex(fingerprint)
+        except ValueError:
+            return ""
+        return fingerprint
+
+    def create_http_session(
+        self,
+        protocol: str,
+        target_fingerprint: str | None = None,
+    ) -> requests.Session:
+        session = requests.Session()
+        # LocalSend is LAN-only; OS proxy settings can break direct peer/IP
+        # binding and must never receive local transfer metadata or contents.
+        session.trust_env = False
+        if protocol == "https":
+            session.cert = (CLIENT_CERT_FILE, CLIENT_KEY_FILE)
+            fingerprint = self.normalize_fingerprint(target_fingerprint)
+            if fingerprint:
+                session.mount("https://", FingerprintAdapter(fingerprint))
+        return session
+
+    def get_https_peer_fingerprint(self, ip_addr: str, port: int, timeout: float = 3.0) -> str:
+        """Read the peer identity over mTLS for first-use/manual-IP connections."""
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        context.load_cert_chain(CLIENT_CERT_FILE, CLIENT_KEY_FILE)
+        with socket.create_connection((ip_addr, port), timeout=timeout) as raw_socket:
+            with context.wrap_socket(raw_socket, server_hostname=ip_addr) as tls_socket:
+                cert_der = tls_socket.getpeercert(binary_form=True)
+        if not cert_der:
+            raise ssl.SSLError("对端未提供 TLS 证书")
+        return hashlib.sha256(cert_der).hexdigest().upper()
+
     def get_port(self) -> int:
         try:
             return int(self.config_data.get("port", 53317))
@@ -296,7 +420,11 @@ class LocalSendGUI(tk.Tk):
             return None
 
         fingerprint = str(payload.get("fingerprint", "")).strip()
-        if fingerprint and fingerprint == self.config_data.get("fingerprint"):
+        own_fingerprints = {
+            str(self.config_data.get("fingerprint", "")).upper(),
+            str(self.tls_fingerprint).upper(),
+        }
+        if fingerprint and fingerprint.upper() in own_fingerprints:
             return None
 
         try:
@@ -445,23 +573,37 @@ class LocalSendGUI(tk.Tk):
                 add_candidate(f"{prefix}.{host}")
 
         protocols = self.protocol_candidates(self.config_data.get("target_protocol"))
-        fingerprint = self.config_data.get("fingerprint", "")
+        discovery_payload = self.build_discovery_payload()
 
         def probe(target_ip: str) -> dict | None:
             if self.shutdown_event.is_set():
                 return None
             for protocol in protocols:
-                url = f"{protocol}://{target_ip}:{port}/api/localsend/v1/info"
+                url = f"{protocol}://{target_ip}:{port}/api/localsend/v2/register"
                 try:
-                    response = requests.get(
-                        url,
-                        params={"fingerprint": fingerprint},
-                        timeout=(0.2, request_timeout_sec),
-                        verify=protocol != "https",
+                    request_payload = dict(discovery_payload)
+                    request_payload["protocol"] = protocol
+                    request_payload["fingerprint"] = (
+                        self.tls_fingerprint
+                        if protocol == "https"
+                        else self.config_data.get("fingerprint", "")
                     )
+                    with self.create_http_session(protocol) as session:
+                        response = session.post(
+                            url,
+                            json=request_payload,
+                            timeout=(0.2, request_timeout_sec),
+                            verify=protocol != "https",
+                        )
                     if response.status_code != 200:
                         continue
                     payload = response.json()
+                    if protocol == "https":
+                        payload["fingerprint"] = self.get_https_peer_fingerprint(
+                            target_ip,
+                            port,
+                            timeout=max(2.0, request_timeout_sec),
+                        )
                 except Exception:
                     continue
                 return self.normalize_discovered_device(payload, target_ip, port, protocol)
@@ -595,6 +737,7 @@ class LocalSendGUI(tk.Tk):
         self.config_data["ip_addr"] = item["ip"]
         self.config_data["port"] = item["port"]
         self.config_data["target_protocol"] = item.get("protocol", "http")
+        self.config_data["target_fingerprint"] = item.get("fingerprint", "")
 
     # ------------------------------------------------------------------
     # GUI 事件
@@ -652,77 +795,186 @@ class LocalSendGUI(tk.Tk):
     def monitor_folder(self):
         folder_path = self.config_data["folder_path"]
         seen = set(os.listdir(folder_path))
+        retry_after: dict[str, float] = {}
         while not self.stop_event.is_set():
             time.sleep(1)
             current = set(os.listdir(folder_path))
             for fname in current - seen:
+                if time.time() < retry_after.get(fname, 0):
+                    continue
                 full = os.path.join(folder_path, fname)
-                self.status_var.set(f"发现新文件: {fname}")
-                self.send_file(full)
-            seen = current
+                if not os.path.isfile(full):
+                    seen.add(fname)
+                    continue
+                self.after(0, self.status_var.set, f"发现新文件: {fname}")
+                if self.send_file(full):
+                    seen.add(fname)
+                    retry_after.pop(fname, None)
+                else:
+                    retry_after[fname] = time.time() + FILE_RETRY_INTERVAL_SEC
+            seen.intersection_update(current)
+            for fname in list(retry_after):
+                if fname not in current:
+                    retry_after.pop(fname, None)
 
-    def send_file(self, filename: str):
+    @staticmethod
+    def sha256_file(filename: str) -> str:
+        digest = hashlib.sha256()
+        with open(filename, "rb") as file_obj:
+            for chunk in iter(lambda: file_obj.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def wait_for_file_ready(filename: str, attempts: int = 10, interval: float = 0.2):
+        """Wait until a newly-created screenshot has stopped growing."""
+        previous_size = -1
+        for _ in range(attempts):
+            current_size = os.path.getsize(filename)
+            if current_size > 0 and current_size == previous_size:
+                return
+            previous_size = current_size
+            time.sleep(interval)
+        raise TimeoutError("文件仍在写入，稍后自动重试")
+
+    def send_file(self, filename: str) -> bool:
         self.last_error = None
         ip_addr = self.config_data["ip_addr"]
         port = self.get_port()
         user = self.config_data["user"] or "Pic2Pad"
         device_name = self.config_data["device_name"] or socket.gethostname()
+        try:
+            self.wait_for_file_ready(filename)
+            file_id = uuid.uuid4().hex
+            file_name = os.path.basename(filename)
+            file_size = os.path.getsize(filename)
+            file_type = mimetypes.guess_type(file_name)[0] or "application/octet-stream"
+            file_sha256 = self.sha256_file(filename)
+        except Exception as exc:
+            self.last_error = f"读取文件失败: {exc}"
+            self.after(0, self.status_var.set, "读取文件失败，稍后重试 [点击查看详情]")
+            return False
 
         def build_payload(protocol: str) -> dict:
             return {
                 "info": {
                     "alias": user,
-                    "version": "2.0",
+                    "version": "2.2",
                     "deviceModel": device_name,
                     "deviceType": "desktop",
-                    "fingerprint": self.config_data.get("fingerprint", ""),
+                    "fingerprint": (
+                        self.tls_fingerprint
+                        if protocol == "https"
+                        else self.config_data.get("fingerprint", "")
+                    ),
                     "port": port,
                     "protocol": protocol,
                     "download": False,
                 },
                 "files": {
-                    "id": {
-                        "id": "myfile",
-                        "fileName": os.path.basename(filename),
-                        "size": os.path.getsize(filename),
-                        "fileType": "image/jpeg",
-                        "sha256": "",
-                        "preview": "",
+                    file_id: {
+                        "id": file_id,
+                        "fileName": file_name,
+                        "size": file_size,
+                        "fileType": file_type,
+                        "sha256": file_sha256,
+                        "preview": None,
                     }
                 },
             }
 
-        def try_send(protocol: str, payload: dict):
-            verify = protocol != "https"
+        def try_send(protocol: str, payload: dict) -> str:
+            target_fingerprint = ""
+            if protocol == "https":
+                observed_fingerprint = self.get_https_peer_fingerprint(ip_addr, port)
+                saved_protocol = self.config_data.get("target_protocol")
+                saved_fingerprint = self.normalize_fingerprint(
+                    self.config_data.get("target_fingerprint")
+                )
+                if (
+                    saved_protocol == "https"
+                    and saved_fingerprint
+                    and saved_fingerprint != observed_fingerprint
+                ):
+                    raise ssl.SSLError(
+                        "iPad 的 TLS 证书指纹已变化；请在设备列表中重新选择该设备"
+                    )
+                target_fingerprint = observed_fingerprint
+
             url1 = f"{protocol}://{ip_addr}:{port}/api/localsend/v2/prepare-upload"
-            r = requests.post(url1, json=payload, timeout=5, verify=verify)
-            r.raise_for_status()
-            data = r.json()
-            url2 = (
-                f"{protocol}://{ip_addr}:{port}/api/localsend/v2/upload?sessionId="
-                f"{data['sessionId']}&fileId=myfile&token={data['files']['myfile']}"
-            )
-            with open(filename, "rb") as f:
-                res = requests.post(url2, data=f, timeout=10, verify=verify)
-                res.raise_for_status()
+            with self.create_http_session(protocol, target_fingerprint) as session:
+                response = session.post(
+                    url1,
+                    json=payload,
+                    timeout=(3, 60),
+                    verify=protocol != "https",
+                )
+                if response.status_code == 204:
+                    return "skipped"
+                response.raise_for_status()
+                try:
+                    data = response.json()
+                except requests.exceptions.JSONDecodeError as exc:
+                    body_preview = response.text[:200].strip() or "<空响应>"
+                    raise ValueError(
+                        f"prepare-upload 返回 HTTP {response.status_code}，"
+                        f"但响应不是 JSON：{body_preview}"
+                    ) from exc
+
+                file_token = data.get("files", {}).get(file_id)
+                if not file_token:
+                    return "skipped"
+
+                url2 = f"{protocol}://{ip_addr}:{port}/api/localsend/v2/upload"
+                with open(filename, "rb") as file_obj:
+                    upload_response = session.post(
+                        url2,
+                        params={
+                            "sessionId": data["sessionId"],
+                            "fileId": file_id,
+                            "token": file_token,
+                        },
+                        data=file_obj,
+                        timeout=(3, 60),
+                        verify=protocol != "https",
+                    )
+                    upload_response.raise_for_status()
+            return "uploaded"
 
         errors = []
         for protocol in self.protocol_candidates(self.config_data.get("target_protocol")):
             payload = build_payload(protocol)
             try:
-                try_send(protocol, payload)
-                if self.config_data.get("target_protocol") != protocol:
+                result = try_send(protocol, payload)
+                config_changed = self.config_data.get("target_protocol") != protocol
+                if config_changed:
                     self.config_data["target_protocol"] = protocol
+                if protocol == "https":
+                    current_fingerprint = self.get_https_peer_fingerprint(ip_addr, port)
+                    if self.config_data.get("target_fingerprint") != current_fingerprint:
+                        self.config_data["target_fingerprint"] = current_fingerprint
+                        config_changed = True
+                if config_changed:
                     self.write_config()
-                self.after(0, self.status_var.set, f"传输完成: {os.path.basename(filename)}")
-                return
+                if result == "skipped":
+                    status = f"无需传输（接收端已处理）: {file_name}"
+                else:
+                    status = f"传输完成: {file_name}"
+                self.after(0, self.status_var.set, status)
+                return True
             except Exception as exc:
                 errors.append(f"{protocol}: {exc}")
+                if not isinstance(
+                    exc,
+                    (requests.exceptions.ConnectionError, requests.exceptions.SSLError),
+                ):
+                    break
 
         # except Exception as exc:
         #     self.status_var.set(f"传输失败！请尝试重启平板端Localsend")
         self.last_error = "\n".join(errors)
         self.after(0, self.status_var.set, "传输失败 [点击查看详情]")
+        return False
 
 if __name__ == "__main__":
     app = LocalSendGUI()
