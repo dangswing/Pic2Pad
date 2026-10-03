@@ -1,12 +1,12 @@
 # Pic2Pad
 
 - Pic2Pad是一个自由、开源的应用程序，启动后自动检测Windows新截图并自动发送至其他设备，以便将截图直接插入笔记软件。
-- 基于[LocalSend Protocol v2.1](https://github.com/localsend/protocol)
+- 基于[LocalSend Protocol v2.2](https://github.com/localsend/protocol)
 
 ## 下载方式
-- **更新日期：2026/06/15**
+- **更新日期：2026/10/03**
 
-- **点击下载：[Pic2Pad_v1.2.1](https://github.com/dangswing/Pic2Pad/releases/download/v1.2/Pic2Pad_1.2.1.exe)**
+- **点击下载：[Pic2Pad_v1.2.1](https://github.com/dangswing/Pic2Pad/releases/download/v1.3/Pic2Pad_1.3.0.exe)**
 
 ## 使用准备
 
@@ -44,7 +44,7 @@ windows系统/第三方软件截图并保存后，软件会自动转发至平板
 对指定路径每隔1秒获取文件列表，对比前后差别，若有新文件则获取文件名
 
 **文件发送**：
-基于[LocalSend Protocol v2.1](https://github.com/localsend/protocol)，采用POST方法将图片以二进制流传输至指定IP地址的服务器
+基于[LocalSend Protocol v2.2](https://github.com/localsend/protocol)，采用POST方法将图片以二进制流传输至指定IP地址的服务器
 
 **文件保存**：
 IOS端Localsend可以自动接收图片并保存至相册
@@ -52,7 +52,7 @@ IOS端Localsend可以自动接收图片并保存至相册
 ## 规划中
 - [x] 初次使用引导
 - [x] 启动后检测连通性
-- [ ] 传输失败重试，或加入文件队列
+- [x] 传输失败重试，或加入文件队列
 - [x] 启动/停止按钮
 - [x] 系统托盘图标/后台运行
 - [x] IP 地址/设备发现
