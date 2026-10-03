@@ -6,7 +6,7 @@
 ## 下载方式
 - **更新日期：2026/10/03**
 
-- **点击下载：[Pic2Pad_v1.2.1](https://github.com/dangswing/Pic2Pad/releases/download/v1.3/Pic2Pad_1.3.0.exe)**
+- **点击下载：[Pic2Pad_v1.3.0](https://github.com/dangswing/Pic2Pad/releases/download/v1.3/Pic2Pad_1.3.0.exe)**
 
 ## 使用准备
 
